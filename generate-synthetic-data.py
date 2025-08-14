@@ -155,8 +155,14 @@ def main(
     except Exception:
       # Fallback: in some cases need to get from structured output fields (SDK version differences)
       # You can also print resp to debug the structure.
-      raise RuntimeError("Model did not return valid JSON. Enable logging to inspect raw response.")
+      # raise RuntimeError("Model did not return valid JSON. Enable logging to inspect raw response.")
+      print("[warn] model output not valid JSON, will try again")
+      continue
 
+    if not isinstance(data, dict) or "items" not in data:
+      print("[warn] model output not list or missing 'items' key, will try again")
+      continue
+    
     items = data.get("items", [])
     if not isinstance(items, list) or len(items) != count:
       typer.echo(f"[warn] expected {count} items, got {len(items)}; continuing.")
