@@ -1,38 +1,65 @@
+###########################################################
+# Load Data
+###########################################################
+import json
+from dotenv import load_dotenv
+load_dotenv()
+from datasets import load_dataset
+
+dataset = load_dataset(
+    "json", 
+    data_files={
+        "train": "data/synthetic/*.jsonl"
+    }
+)
+
+def normalize(ex):
+    ex["text"] = str(ex.get("text", ""))
+    ents = ex.get("entities", [])
+    if ents is None:
+        ents = []
+
+    if isinstance(ents, dict):
+        ents = [ents]
+
+    norm = []
+    for e in ents:
+        norm.append({
+            "mention":        str(e.get("mention", "")),
+            "type":           str(e.get("type", "")),
+            "assertion":      str(e.get("assertion", "")),
+            "context_window": str(e.get("context_window", "")),
+        })
+    ex["entities"] = norm
+    return ex
+
+dataset = dataset.map(normalize, desc="normalizing schema")
+print(f'* loaded {len(dataset)} examples')
+
+# split = ds["train"].train_test_split(test_size=0.1, seed=42)
+# train_ds, eval_ds = split["train"], split["test"]
+
+
+###########################################################
+# Load Model
+###########################################################
 from unsloth import FastLanguageModel
 import torch
-max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
-dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
-load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
-# 4bit pre quantized models we support for 4x faster downloading + no OOMs.
-fourbit_models = [
-    "unsloth/Meta-Llama-3.1-8B-bnb-4bit",      # Llama-3.1 2x faster
-    "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
-    "unsloth/Meta-Llama-3.1-70B-bnb-4bit",
-    "unsloth/Meta-Llama-3.1-405B-bnb-4bit",    # 4bit for 405b!
-    "unsloth/Mistral-Small-Instruct-2409",     # Mistral 22b 2x faster!
-    "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
-    "unsloth/Phi-3.5-mini-instruct",           # Phi-3.5 2x faster!
-    "unsloth/Phi-3-medium-4k-instruct",
-    "unsloth/gemma-2-9b-bnb-4bit",
-    "unsloth/gemma-2-27b-bnb-4bit",            # Gemma 2x faster!
-
-    "unsloth/Llama-3.2-1B-bnb-4bit",           # NEW! Llama 3.2 models
-    "unsloth/Llama-3.2-1B-Instruct-bnb-4bit",
-    "unsloth/Llama-3.2-3B-bnb-4bit",
-    "unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
-
-    "unsloth/Llama-3.3-70B-Instruct-bnb-4bit" # NEW! Llama 3.3 70B!
-] # More models at https://huggingface.co/unsloth
+# Choose any! We auto support RoPE Scaling internally!
+max_seq_length = 2048
+# None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
+dtype = None 
+# Use 4bit quantization to reduce memory usage. Can be False.
+load_in_4bit = True 
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/Llama-3.2-3B-Instruct", # or choose "unsloth/Llama-3.2-1B-Instruct"
+    model_name = "unsloth/Llama-3.2-1B-Instruct", 
     max_seq_length = max_seq_length,
     dtype = dtype,
     load_in_4bit = load_in_4bit,
     # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
 )
-
 
 model = FastLanguageModel.get_peft_model(
     model,
@@ -49,8 +76,11 @@ model = FastLanguageModel.get_peft_model(
     loftq_config = None, # And LoftQ
 )
 
-# Data Prep
 
+
+###########################################################
+# Prepare data
+###########################################################
 from unsloth.chat_templates import get_chat_template
 
 tokenizer = get_chat_template(
@@ -58,20 +88,60 @@ tokenizer = get_chat_template(
     chat_template = "llama-3.1",
 )
 
+SYSTEM_PROMPT = """
+You are an information extraction model for fictional, de-identified clinical notes.
+Extract ONLY strict JSON conforming to this schema:
+
+{
+  "entities": [
+    { 
+      "mention": string, 
+      "type":"Symptom|Diagnosis|Treatment", 
+      "assertion":"Positive|Negated|Possible", 
+      "context_window": string
+    }
+  ]
+}
+
+Rules:
+ - Output JSON only, no extra keys or explanations.
+ - Maintain medical plausibility; all content is fictional.
+"""
+
+USER_PROMPT = """
+Extract entities with assertion from this note:
+
+{note}
+"""
+
 def formatting_prompts_func(examples):
-    convos = examples["conversations"]
-    texts = [tokenizer.apply_chat_template(convo, tokenize = False, add_generation_prompt = False) for convo in convos]
+    """
+    Convert the examples into a format suitable for the model.
+    """
+    text_list = examples["text"]
+    ents_list = examples["entities"]
+
+    texts = []
+    for note, ents in zip(text_list, ents_list):
+        convo = [
+            { "from": "system",    "content": SYSTEM_PROMPT },
+            { "from": "user",      "content": USER_PROMPT.format(note=note) },
+            { "from": "assistant", "content": json.dumps({"entities": ents}, ensure_ascii=False) }
+        ]
+
+        texts.append(
+            tokenizer.apply_chat_template(
+                convo, 
+                tokenize = False, 
+                add_generation_prompt = False
+            )
+        )
+    
     return { "text" : texts, }
 
-
-from datasets import load_dataset
-dataset = load_dataset("mlabonne/FineTome-100k", split = "train")
-
-
-from unsloth.chat_templates import standardize_sharegpt
-dataset = standardize_sharegpt(dataset)
 dataset = dataset.map(formatting_prompts_func, batched = True,)
 
+dataset = dataset['train']
 
 # Train!
 
@@ -136,5 +206,6 @@ print(f"Peak reserved memory for training % of max memory = {lora_percentage} %.
 
 
 # save
-model.save_pretrained("lora_model")  # Local saving
-tokenizer.save_pretrained("lora_model")
+path_model_ft = "save/llama-3.2-1b-it-qlora"
+model.save_pretrained(path_model_ft)  # Local saving
+tokenizer.save_pretrained(path_model_ft)
