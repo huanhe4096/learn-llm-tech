@@ -124,9 +124,9 @@ def formatting_prompts_func(examples):
     texts = []
     for note, ents in zip(text_list, ents_list):
         convo = [
-            { "from": "system",    "content": SYSTEM_PROMPT },
-            { "from": "user",      "content": USER_PROMPT.format(note=note) },
-            { "from": "assistant", "content": json.dumps({"entities": ents}, ensure_ascii=False) }
+            { "role": "system",    "content": SYSTEM_PROMPT },
+            { "role": "user",      "content": USER_PROMPT.format(note=note) },
+            { "role": "assistant", "content": json.dumps({"entities": ents}, ensure_ascii=False) }
         ]
 
         texts.append(
